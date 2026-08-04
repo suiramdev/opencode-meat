@@ -4,9 +4,11 @@ Read [meat](https://github.com/boldsoftware/meat) **reading diffs** inside OpenC
 
 `meat` abridges a git diff with an LLM — it drops everything not worth reading and prints
 the remainder plus a one-line summary. This plugin runs the `meat` CLI directly from the
-TUI: `/meat` asks which model should read the diff, then shows the result in a full-screen,
-scrollable window. **No prompt is ever sent to your agent** — the slash command never
-reaches a session, so it costs no agent tokens and leaves no message behind.
+TUI: `/meat` asks which model should read the diff and then gets out of the way. meat thinks
+in a background subprocess while you keep typing and sending prompts; a line above the
+prompt tracks it, and the finished diff opens in a full-screen, scrollable window whenever
+you ask for it. **No prompt is ever sent to your agent** — the slash command never reaches a
+session, so it costs no agent tokens and leaves no message behind.
 
 The same abridging is also exposed as a `meat` tool, so an agent can ask for it on purpose.
 
@@ -32,7 +34,7 @@ wherever `OPENCODE_CONFIG_DIR` points).
 {
   "name": "opencode-config",
   "private": true,
-  "dependencies": { "@suiramdev/opencode-meat": "^0.2.2" }
+  "dependencies": { "@suiramdev/opencode-meat": "^0.3.0" }
 }
 ```
 
@@ -65,8 +67,32 @@ file with no reachable `node_modules` fails with `Cannot find package 'solid-js'
 | `/meat -w`          | `git diff` (unstaged working tree) |
 
 `/meat` opens a model picker first; cancelling it (escape) does nothing at all — no
-subprocess, no window. Picking a model runs `meat` and opens the diff window, which
-remembers your choice for next time.
+subprocess, no window. Picking a model starts `meat` and hands the prompt straight back:
+nothing takes over the screen, and the choice is remembered for next time.
+
+While meat reads, a line above the prompt keeps count, and you can keep typing and sending
+prompts past it:
+
+```
+⠙ meat is reading HEAD~3 · 12s
+meat read HEAD~3 · ctrl+x d to open
+```
+
+Several reads can be in flight at once; each gets its own line.
+
+| Command / key         | Does                                                         |
+| --------------------- | ------------------------------------------------------------ |
+| `ctrl+x d`            | Open a finished reading diff (`<leader>d`)                    |
+| `/meat-diff`          | The same, spelled as a command                               |
+| `meat.dismiss`        | Clear the finished lines above the prompt (command palette)   |
+
+Opening clears that read's line, and the diff stays in memory: close it and reopen it as
+often as you like. With more than one finished read, opening asks which one. A read that is
+still going says so instead of opening a half-empty window, and a failed read opens to
+meat's own error plus the exact argv it ran.
+
+The last eight reads are kept, oldest finished ones dropped first; a read still in flight is
+never dropped. Nothing survives a TUI restart.
 
 | Key                    | In the diff window   |
 | ---------------------- | -------------------- |
@@ -173,3 +199,8 @@ export { default } from "../../../src/tui.js"
 - A missing binary surfaces as a tool error naming the `go install` command.
 - meat's own errors (missing API key, `no diff to read`, bad revision) are passed through
   verbatim from its stderr.
+- `ctrl+x d` is only the default: it is the command `meat.show`, so `tui.json`'s `keybinds`
+  can move it (`"meat.show": "<leader>D"`) or switch it off with `"none"`. The line above the
+  prompt reads the live binding, and says `/meat-diff` when there is none.
+- Nothing is cancellable mid-read: meat is left to finish or fail on its own. It caches under
+  `~/.meat`, so a read you stopped caring about costs nothing the next time.

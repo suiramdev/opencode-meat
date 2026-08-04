@@ -2,54 +2,44 @@
 import type { ModelInfo, ProviderInfo } from "@opencode-ai/client"
 import type { Plugin } from "@opencode-ai/plugin/tui"
 import type { ScrollBoxRenderable } from "@opentui/core"
-import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import {
   describeTarget,
+  errorMessage,
   meatArgs,
   parseArguments,
   readConfig,
-  runMeat,
   type MeatConfig,
   type MeatResult,
   type Target,
 } from "./meat.js"
 import { planInvocation } from "./provider.js"
+import * as Runs from "./runs.js"
 
 const ROUTE = "meat"
 const DEFAULT_MODEL = "\u0000default"
-
-type Destination = Parameters<Plugin.Context["ui"]["router"]["navigate"]>[0]
-
-interface Run {
-  readonly config: MeatConfig
-  readonly target: Target
-  readonly directory: string
-  readonly model: string
-  readonly returnTo: Destination
-  readonly result: Promise<MeatResult>
-}
-
-/**
- * Runs are keyed out of band instead of travelling in the route's `data`: the
- * invocation carries a provider API key, and route data is a reconciled store
- * the host may hand back to us across restarts.
- */
-const runs = new Map<string, Run>()
 
 export default {
   id: "meat",
   setup(ctx: Plugin.Context) {
     const dispose = ctx.ui.router.register({
       name: ROUTE,
-      render: (input) => <Page ctx={ctx} run={runs.get(String(input.data?.["run"] ?? ""))} />,
+      render: (input) => <Page ctx={ctx} run={Runs.get(String(input.data?.["run"] ?? ""))} />,
     })
-    // The command layer lives in the always-mounted `app` slot so `/meat` works
-    // from every route, exactly like the built-in diff viewer.
-    const unslot = ctx.ui.slot("app", () => <Commands ctx={ctx} />)
+    const slots = [
+      // The command layer lives in the always-mounted `app` slot so `/meat` works
+      // from every route, exactly like the built-in diff viewer.
+      ctx.ui.slot("app", () => <Commands ctx={ctx} />),
+      // meat thinks in a subprocess and the user keeps typing, so its progress
+      // belongs directly above the prompt rather than in a window they'd have to
+      // sit in. The home slot covers the route with no composer.
+      ctx.ui.slot("session.composer.top", () => <Notices ctx={ctx} />),
+      ctx.ui.slot("home.footer", () => <Notices ctx={ctx} />),
+    ]
     return () => {
-      unslot()
+      for (const unslot of slots) unslot()
       dispose()
-      runs.clear()
+      Runs.clear()
     }
   },
 } satisfies Plugin.Definition
@@ -69,9 +59,36 @@ function Commands(props: { readonly ctx: Plugin.Context }) {
         slash: { name: "meat", arguments: true },
         run: (input) => start(props.ctx, input, stored.ref, (ref) => store((draft) => void (draft.ref = ref))),
       },
+      {
+        id: "meat.show",
+        title: "Open a meat reading diff",
+        description: "Open the diff meat finished reading, as often as you like",
+        group: "Meat",
+        palette: true,
+        bind: "<leader>d",
+        slash: { name: "meat-diff" },
+        enabled: () => Runs.list().length > 0,
+        run: () => show(props.ctx),
+      },
+      {
+        id: "meat.dismiss",
+        title: "Dismiss the meat notices",
+        description: "Clears the finished notices above the prompt; the diffs stay open-able",
+        group: "Meat",
+        palette: true,
+        enabled: () => Runs.list().some(retirable),
+        run: () => {
+          for (const run of Runs.list()) if (retirable(run)) run.dismiss()
+        },
+      },
     ],
   }))
   return null
+}
+
+/** A notice is only worth clearing once its run stopped moving. */
+function retirable(run: Runs.Run): boolean {
+  return !run.dismissed() && run.phase().status !== "reading"
 }
 
 async function start(
@@ -84,42 +101,151 @@ async function start(
   try {
     target = parseArguments(input)
   } catch (error) {
-    ctx.ui.toast.show({ variant: "error", title: "meat", message: message(error) })
+    ctx.ui.toast.show({ variant: "error", title: "meat", message: errorMessage(error) })
     return
   }
 
   const config = readConfig(ctx.options)
   const choice = await pickModel(ctx, config, remembered)
-  // Cancelled: no window, no prompt, no subprocess.
+  // Cancelled: no run, no prompt, no subprocess.
   if (!choice) return
   remember(choice.ref)
 
-  const directory = (ctx.location ?? ctx.data.location.default()).directory
-  const id = `${Date.now().toString(36)}-${runs.size}`
-  const run: Run = {
+  // Nothing navigates: the picker closes, the prompt keeps focus, and meat reads
+  // in the background until its notice says the diff is ready.
+  ctx.ui.dialog.clear()
+  Runs.begin({
     config: choice.config,
     target,
-    directory,
+    directory: (ctx.location ?? ctx.data.location.default()).directory,
     model: choice.label,
-    returnTo: returnable(ctx),
-    // Started here rather than in the page so a remount never re-runs meat.
-    result: runMeat(choice.config, target, directory),
-  }
-  // A rejected promise with no reader yet would be an unhandled rejection.
-  run.result.catch(() => {})
-  runs.set(id, run)
-
-  ctx.ui.dialog.clear()
-  ctx.ui.router.navigate({ type: "plugin", name: ROUTE, data: { run: id } })
+  })
 }
 
-function returnable(ctx: Plugin.Context): Destination {
+async function show(ctx: Plugin.Context) {
+  // Newest first: the run you just watched finish is the one you meant.
+  const finished = Runs.list()
+    .filter((run) => run.phase().status !== "reading")
+    .reverse()
+  if (finished.length === 0) {
+    const reading = Runs.list().at(-1)
+    ctx.ui.toast.show({
+      variant: "info",
+      title: "meat",
+      message: reading ? `still reading ${describeTarget(reading.target)}…` : "no diff read yet — run /meat first",
+    })
+    return
+  }
+  const run = finished.length === 1 ? finished[0] : await pickRun(ctx, finished)
+  if (!run) return
+  run.dismiss()
+  // Recorded per open, not per run: closing goes back where this open came from.
+  run.returnTo = returnable(ctx)
+  ctx.ui.dialog.clear()
+  ctx.ui.router.navigate({ type: "plugin", name: ROUTE, data: { run: run.id } })
+}
+
+async function pickRun(ctx: Plugin.Context, finished: readonly Runs.Run[]): Promise<Runs.Run | undefined> {
+  const picked = await ctx.ui.dialog.select<string>({
+    title: "meat diffs",
+    placeholder: "Which reading diff?",
+    options: finished.map((run) => {
+      const phase = run.phase()
+      return {
+        title: describeTarget(run.target),
+        value: run.id,
+        description:
+          phase.status === "ready"
+            ? `${run.model} · ${phase.result.summary}`
+            : `${run.model} · failed: ${firstLine(phase.status === "failed" ? phase.message : "")}`,
+      }
+    }),
+    current: finished[0]?.id,
+  })
+  return picked === undefined ? undefined : finished.find((run) => run.id === picked)
+}
+
+function returnable(ctx: Plugin.Context): Runs.Destination {
   const route = ctx.ui.router.current()
   if (route.type === "session") return { type: "session", sessionID: route.sessionID }
   if (route.type === "plugin") {
     return { type: "plugin", id: route.id, name: route.name, ...(route.data ? { data: { ...route.data } } : {}) }
   }
   return { type: "home" }
+}
+
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+const TICK_MS = 100
+
+function Notices(props: { readonly ctx: Plugin.Context }) {
+  const visible = createMemo(() => Runs.list().filter((run) => !run.dismissed()))
+  const reading = createMemo(() => visible().some((run) => run.phase().status === "reading"))
+  // One clock for every notice; the spinner frame and each elapsed time fall out
+  // of it, and it only ticks while something is actually being read.
+  const [now, setNow] = createSignal(Date.now())
+  createEffect(() => {
+    if (!reading()) return
+    const timer = setInterval(() => setNow(Date.now()), TICK_MS)
+    onCleanup(() => clearInterval(timer))
+  })
+  // Read from the keymap so a rebound (or unbound) shortcut still reads true.
+  const hint = createMemo(() => props.ctx.keymap.shortcuts("meat.show")[0] ?? "/meat-diff")
+
+  return (
+    <Show when={visible().length}>
+      <box flexDirection="column" paddingLeft={3} paddingRight={3} paddingBottom={1}>
+        <For each={visible()}>{(run) => <Notice ctx={props.ctx} run={run} now={now} hint={hint} />}</For>
+      </box>
+    </Show>
+  )
+}
+
+function Notice(props: {
+  readonly ctx: Plugin.Context
+  readonly run: Runs.Run
+  readonly now: () => number
+  readonly hint: () => string
+}) {
+  const theme = () => props.ctx.theme
+  const target = () => describeTarget(props.run.target)
+  const failure = createMemo(() => {
+    const phase = props.run.phase()
+    return phase.status === "failed" ? firstLine(phase.message) : undefined
+  })
+  const label = createMemo(() => {
+    if (props.run.phase().status === "reading") {
+      const frame = SPINNER[Math.floor(props.now() / TICK_MS) % SPINNER.length]
+      return `${frame} meat is reading ${target()} · ${elapsed(props.now() - props.run.startedAt)}`
+    }
+    return `meat read ${target()} · ${props.hint()} to open`
+  })
+
+  return (
+    <Show
+      when={failure()}
+      fallback={
+        <text fg={theme().text.subdued} wrapMode="none">
+          {label()}
+        </text>
+      }
+    >
+      {(failed: () => string) => (
+        <text fg={theme().text.feedback.error.default} wrapMode="none">
+          meat failed on {target()} · {failed()}
+        </text>
+      )}
+    </Show>
+  )
+}
+
+function elapsed(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`
+}
+
+function firstLine(text: string): string {
+  return text.split("\n")[0] || text
 }
 
 interface Choice {
@@ -208,24 +334,9 @@ function byProviderThenName(providers: ReadonlyMap<string, ProviderInfo>) {
   }
 }
 
-type State =
-  | { readonly status: "loading" }
-  | { readonly status: "ok"; readonly result: MeatResult }
-  | { readonly status: "error"; readonly message: string }
-
-function Page(props: { readonly ctx: Plugin.Context; readonly run: Run | undefined }) {
+function Page(props: { readonly ctx: Plugin.Context; readonly run: Runs.Run | undefined }) {
   const theme = () => props.ctx.theme.contextual.elevated
-  // Deliberately not createResource: reading an errored resource throws into the
-  // host's plugin error boundary, which would replace the page with a toast.
-  const [state, setState] = createSignal<State>({ status: "loading" })
-  createEffect(() => {
-    const run = props.run
-    if (!run) return
-    run.result.then(
-      (result) => setState({ status: "ok", result }),
-      (error: unknown) => setState({ status: "error", message: message(error) }),
-    )
-  })
+  const phase = () => props.run?.phase()
   let scroll: ScrollBoxRenderable | undefined
 
   const close = () => {
@@ -271,12 +382,12 @@ function Page(props: { readonly ctx: Plugin.Context; readonly run: Run | undefin
   }))
 
   const failure = createMemo(() => {
-    const current = state()
-    return current.status === "error" ? current.message : undefined
+    const current = phase()
+    return current?.status === "failed" ? current.message : undefined
   })
   const result = createMemo(() => {
-    const current = state()
-    return current.status === "ok" ? current.result : undefined
+    const current = phase()
+    return current?.status === "ready" ? current.result : undefined
   })
   const lines = createMemo(() => {
     const current = result()
@@ -297,7 +408,7 @@ function Page(props: { readonly ctx: Plugin.Context; readonly run: Run | undefin
             <text fg={theme().text.subdued}>This diff is gone. Run /meat again.</text>
           </box>
         </Match>
-        <Match when={state().status === "loading"}>
+        <Match when={phase()?.status === "reading"}>
           <box flexGrow={1} paddingLeft={1}>
             <text fg={theme().text.subdued}>
               Reading {props.run ? describeTarget(props.run.target) : ""} — meat is thinking…
@@ -414,8 +525,4 @@ function background(ctx: Plugin.Context, kind: LineKind) {
   if (kind === "added") return theme.diff.background.added
   if (kind === "removed") return theme.diff.background.removed
   return undefined
-}
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }

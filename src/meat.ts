@@ -138,6 +138,11 @@ function describeFailure(error: unknown, binary: string): string {
   return err?.message ?? String(error)
 }
 
+/** meat's own failures already read as prose; anything else falls back to its text. */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 /** Tool input: `{ revision?, staged?, worktree? }`. */
 export function parseTarget(input: unknown): Target {
   const record = (input ?? {}) as Record<string, unknown>
