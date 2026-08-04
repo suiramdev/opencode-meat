@@ -34,7 +34,7 @@ wherever `OPENCODE_CONFIG_DIR` points).
 {
   "name": "opencode-config",
   "private": true,
-  "dependencies": { "@suiramdev/opencode-meat": "^0.4.1" }
+  "dependencies": { "@suiramdev/opencode-meat": "^0.4.2" }
 }
 ```
 
@@ -167,6 +167,13 @@ meat ──x-api-key: <local secret>──▶ 127.0.0.1:<port> ──Authorizati
   credential) is forwarded as `x-api-key` instead, because that is what it is.
 - The relay binds loopback only and requires a random per-run secret, which is what meat
   sends as its `x-api-key`. Without it no other local process can spend your subscription.
+- One listener per server process, not per plugin instance: OpenCode loads a server plugin
+  per request — hundreds of times in a working session — so a relay tied to an instance
+  would almost never be listening when meat runs.
+- The url and secret are published under `~/.cache/opencode-meat/`, keyed by config
+  directory, so two profiles running at once cannot hand each other's credential to meat.
+  The writer's pid is checked on read, so a server that died is ignored rather than sending
+  meat at a closed port.
 - **No Claude Code impersonation.** A Max token was checked against `api.anthropic.com` and
   needs none: bearer alone returns 200, with no identity system prompt, no client
   fingerprint and no user-agent spoof. Only the documented `oauth-2025-04-20` beta is added.

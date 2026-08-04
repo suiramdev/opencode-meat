@@ -52,12 +52,11 @@ export default Plugin.define({
       })
     })
 
+    // The relay is deliberately not torn down here. OpenCode instantiates a
+    // server plugin per request, so closing it with an instance would leave meat
+    // calling a port that is almost never open.
     return async () => {
       await tool.dispose()
-      if (relay) {
-        OAuth.unpublish()
-        await relay.close()
-      }
     }
   },
 })
@@ -94,20 +93,14 @@ async function relayFor(ctx: Plugin.Context): Promise<OAuth.Relay | undefined> {
   }
 
   try {
-    if (!(await resolve())) {
-      // Nothing to relay — clear any file a previous run left behind, or the TUI
-      // would point meat at a dead port instead of falling back to the
-      // environment.
-      OAuth.unpublish()
-      return undefined
-    }
-    const relay = await OAuth.start(resolve)
-    OAuth.publish(relay)
-    return relay
+    // No credential, no listener: someone with a plain $ANTHROPIC_API_KEY needs
+    // none of this. A stale file from a dead server is ignored by the reader, so
+    // there is nothing to clean up here.
+    if (!(await resolve())) return undefined
+    return await OAuth.ensure(resolve)
   } catch {
     // A relay that cannot start must not take the plugin down with it: meat
     // still works for anyone whose key is already in the environment.
-    OAuth.unpublish()
     return undefined
   }
 }

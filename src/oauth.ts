@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto"
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { createHash, randomBytes } from "node:crypto"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -42,25 +42,32 @@ export interface Relay {
 
 /**
  * The two halves meet on disk: the credential is only reachable from the server
- * plugin, and meat is spawned by the TUI. A fixed per-user path, because TMPDIR
- * is not guaranteed to agree across the two processes.
+ * plugin, and meat is spawned by the TUI. Keyed by config directory, which both
+ * halves of one profile share, so two profiles running at once cannot hand each
+ * other's credential to meat. A fixed per-user root, because TMPDIR is not
+ * guaranteed to agree across the two processes.
  */
 function rendezvous(): string {
-  return join(homedir(), ".cache", "opencode-meat", "relay.json")
+  const config = process.env["OPENCODE_CONFIG_DIR"] ?? join(homedir(), ".config", "opencode")
+  const key = createHash("sha256").update(config).digest("hex").slice(0, 12)
+  return join(homedir(), ".cache", "opencode-meat", `relay-${key}.json`)
 }
 
 /** Publishes the relay for the TUI half. The file carries no credential. */
-export function publish(relay: Relay) {
+function publish(relay: Relay) {
   const path = rendezvous()
   mkdirSync(join(path, ".."), { recursive: true })
   writeFileSync(path, JSON.stringify({ url: relay.url, key: relay.key, pid: process.pid }), { mode: 0o600 })
 }
 
-export function unpublish() {
-  rmSync(rendezvous(), { force: true })
-}
-
-/** The relay this machine is running, if any. Read by the TUI half. */
+/**
+ * The relay serving this profile, if one is actually running. Read by the TUI
+ * half.
+ *
+ * The pid is checked rather than the file's mere existence: a server that died
+ * without unpublishing would otherwise send meat at a closed port, and
+ * "connection refused" reads like a broken plugin instead of a missing key.
+ */
 export function published(): { readonly url: string; readonly key: string } | undefined {
   let raw: string
   try {
@@ -71,13 +78,48 @@ export function published(): { readonly url: string; readonly key: string } | un
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>
     if (typeof parsed["url"] !== "string" || typeof parsed["key"] !== "string") return undefined
+    if (typeof parsed["pid"] === "number" && !alive(parsed["pid"])) return undefined
     return { url: parsed["url"], key: parsed["key"] }
   } catch {
     return undefined
   }
 }
 
-export async function start(resolve: Resolve): Promise<Relay> {
+function alive(pid: number): boolean {
+  try {
+    // Signal 0 only tests for the process; it delivers nothing.
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+let running: Promise<Relay> | undefined
+let resolver: Resolve | undefined
+
+/**
+ * One relay per process, however often the plugin is instantiated.
+ *
+ * OpenCode loads a server plugin per request — hundreds of times in a working
+ * session — so a relay owned by a single instance would be started and torn down
+ * continuously, and would almost never be listening at the moment meat runs. The
+ * listener therefore outlives every instance, and each instance only rebinds the
+ * resolver, since the context of a disposed one is no longer trustworthy.
+ */
+export function ensure(resolve: Resolve): Promise<Relay> {
+  resolver = resolve
+  running ??= begin()
+  return running
+}
+
+async function begin(): Promise<Relay> {
+  const relay = await start(() => (resolver ?? (() => Promise.resolve(undefined)))())
+  publish(relay)
+  return relay
+}
+
+async function start(resolve: Resolve): Promise<Relay> {
   const key = randomBytes(24).toString("hex")
   const server = createServer((request, response) => {
     handle(request, response, key, resolve).catch((error: unknown) => {
