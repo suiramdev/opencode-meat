@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto"
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -40,48 +40,79 @@ export interface Relay {
   close: () => Promise<void>
 }
 
+/** Where relays announce themselves. A fixed per-user root, because TMPDIR is not
+ * guaranteed to agree across the two processes. */
+function directory(): string {
+  return join(homedir(), ".cache", "opencode-meat")
+}
+
 /**
- * The two halves meet on disk: the credential is only reachable from the server
- * plugin, and meat is spawned by the TUI. Keyed by config directory, which both
- * halves of one profile share, so two profiles running at once cannot hand each
- * other's credential to meat. A fixed per-user root, because TMPDIR is not
- * guaranteed to agree across the two processes.
+ * One file per config directory, so a profile's own relay is identifiable.
+ * Reading falls back to any live relay, because the two halves do not always
+ * agree on the config directory — a TUI reuses whichever background service is
+ * already on the port, and that service may have been started from a different
+ * one.
  */
 function rendezvous(): string {
   const config = process.env["OPENCODE_CONFIG_DIR"] ?? join(homedir(), ".config", "opencode")
   const key = createHash("sha256").update(config).digest("hex").slice(0, 12)
-  return join(homedir(), ".cache", "opencode-meat", `relay-${key}.json`)
+  return join(directory(), `relay-${key}.json`)
 }
 
 /** Publishes the relay for the TUI half. The file carries no credential. */
 function publish(relay: Relay) {
-  const path = rendezvous()
-  mkdirSync(join(path, ".."), { recursive: true })
-  writeFileSync(path, JSON.stringify({ url: relay.url, key: relay.key, pid: process.pid }), { mode: 0o600 })
+  mkdirSync(directory(), { recursive: true })
+  writeFileSync(rendezvous(), JSON.stringify({ url: relay.url, key: relay.key, pid: process.pid }), { mode: 0o600 })
+}
+
+interface Published {
+  readonly url: string
+  readonly key: string
 }
 
 /**
- * The relay serving this profile, if one is actually running. Read by the TUI
- * half.
+ * A relay that is actually running, preferring this profile's own.
  *
  * The pid is checked rather than the file's mere existence: a server that died
  * without unpublishing would otherwise send meat at a closed port, and
  * "connection refused" reads like a broken plugin instead of a missing key.
  */
-export function published(): { readonly url: string; readonly key: string } | undefined {
-  let raw: string
+export function published(): Published | undefined {
+  const own = read(rendezvous())
+  if (own) return own
+  let names: string[]
   try {
-    raw = readFileSync(rendezvous(), "utf8")
+    names = readdirSync(directory())
   } catch {
     return undefined
   }
+  const live = names
+    .filter((name) => name.startsWith("relay-") && name.endsWith(".json"))
+    .map((name) => join(directory(), name))
+    .map((path) => ({ path, relay: read(path) }))
+    .filter((entry): entry is { path: string; relay: Published } => entry.relay !== undefined)
+  // Newest wins: with several profiles running, the last server to announce
+  // itself is the one most likely to belong to this window.
+  live.sort((a, b) => modified(b.path) - modified(a.path))
+  return live[0]?.relay
+}
+
+function read(path: string): Published | undefined {
   try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>
     if (typeof parsed["url"] !== "string" || typeof parsed["key"] !== "string") return undefined
     if (typeof parsed["pid"] === "number" && !alive(parsed["pid"])) return undefined
     return { url: parsed["url"], key: parsed["key"] }
   } catch {
     return undefined
+  }
+}
+
+function modified(path: string): number {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return 0
   }
 }
 

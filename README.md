@@ -34,7 +34,7 @@ wherever `OPENCODE_CONFIG_DIR` points).
 {
   "name": "opencode-config",
   "private": true,
-  "dependencies": { "@suiramdev/opencode-meat": "^0.4.2" }
+  "dependencies": { "@suiramdev/opencode-meat": "^0.4.3" }
 }
 ```
 
