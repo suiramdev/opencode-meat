@@ -94,13 +94,20 @@ async function relayFor(ctx: Plugin.Context): Promise<OAuth.Relay | undefined> {
   }
 
   try {
-    if (!(await resolve())) return undefined
+    if (!(await resolve())) {
+      // Nothing to relay — clear any file a previous run left behind, or the TUI
+      // would point meat at a dead port instead of falling back to the
+      // environment.
+      OAuth.unpublish()
+      return undefined
+    }
     const relay = await OAuth.start(resolve)
     OAuth.publish(relay)
     return relay
   } catch {
     // A relay that cannot start must not take the plugin down with it: meat
     // still works for anyone whose key is already in the environment.
+    OAuth.unpublish()
     return undefined
   }
 }
