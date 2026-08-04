@@ -34,7 +34,7 @@ wherever `OPENCODE_CONFIG_DIR` points).
 {
   "name": "opencode-config",
   "private": true,
-  "dependencies": { "@suiramdev/opencode-meat": "^0.4.3" }
+  "dependencies": { "@suiramdev/opencode-meat": "^0.5.0" }
 }
 ```
 
@@ -85,7 +85,9 @@ shortened to fit:
 ⠙ meat HEAD~3 · 12s        meat HEAD~3 · ctrl+x d
 ```
 
-Several reads can be in flight at once; each gets its own line.
+Several reads can be in flight at once; each gets its own line. Whichever notice is showing,
+a failed read also raises a toast, so a failure is never silent even when the prompt is out
+of sight.
 
 | Command / key         | Does                                                         |
 | --------------------- | ------------------------------------------------------------ |
@@ -174,9 +176,25 @@ meat ──x-api-key: <local secret>──▶ 127.0.0.1:<port> ──Authorizati
   directory, so two profiles running at once cannot hand each other's credential to meat.
   The writer's pid is checked on read, so a server that died is ignored rather than sending
   meat at a closed port.
-- **No Claude Code impersonation.** A Max token was checked against `api.anthropic.com` and
-  needs none: bearer alone returns 200, with no identity system prompt, no client
-  fingerprint and no user-agent spoof. Only the documented `oauth-2025-04-20` beta is added.
+- The request is shaped to look like the client the subscription is for: `user-agent`,
+  the two OAuth betas, and two leading `system` blocks — a billing header carrying a hash
+  of the first user message, then the client identity string. This is **not** cosmetic.
+  Measured with one `max_tokens: 1` request, changing nothing but the shape:
+
+  | Sent | Anthropic answers |
+  | --- | --- |
+  | bearer + oauth beta | `429 rate_limit_error` |
+  | + user-agent, identity and billing blocks | `200` |
+  | …and again with meat's own lowercase tool names | `200` |
+
+  Tool names are therefore left alone. Those constants mirror
+  `@suiramdev/opencode-anthropic-auth`, which owns the same handshake for OpenCode's own
+  requests; they are copied rather than imported because that package exports only its entry
+  and provider, and lives in OpenCode's plugin cache rather than beside this one. Keep them
+  in step: a client version Anthropic stops recognising comes back as a rate-limit error,
+  not as an authentication one.
+- `retry-after` and `anthropic-ratelimit-*` are passed back to meat, so a throttled run can
+  be read from its own output.
 
 This needs both halves installed (the server half holds the credential, the TUI spawns
 meat). With only the window installed, keyless entries fall back to your environment.

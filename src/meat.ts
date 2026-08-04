@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
+import { isRecord } from "./guards.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -111,10 +112,10 @@ function parseResult(stdout: string): MeatResult {
   } catch {
     throw new Error(`unexpected meat output (not JSON): ${stdout.slice(0, 500)}`)
   }
-  if (!parsed || typeof parsed !== "object") {
+  if (!isRecord(parsed)) {
     throw new Error(`unexpected meat output (not an object): ${stdout.slice(0, 500)}`)
   }
-  const record = parsed as Record<string, unknown>
+  const record = parsed
   if (typeof record["smart_diff"] !== "string" || typeof record["summary"] !== "string") {
     throw new Error(`unexpected meat output (missing summary/smart_diff): ${stdout.slice(0, 500)}`)
   }

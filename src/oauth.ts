@@ -3,6 +3,7 @@ import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "n
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { isRecord } from "./guards.js"
 
 /**
  * meat only ever authenticates with `x-api-key` (`meat/anthropic.go`), and
@@ -12,17 +13,43 @@ import { join } from "node:path"
  * server-side and never hands it to the TUI, so meat cannot be given a key at
  * all: hence "AnthropicModel.APIKey is empty".
  *
- * So meat is pointed at a loopback relay instead. It swaps the header for
- * whatever the credential actually is, and forwards untouched.
+ * So meat is pointed at a loopback relay instead, which swaps the header for the
+ * credential OpenCode holds and — for a subscription token — makes the request
+ * look like the client that subscription is for.
  *
- * Deliberately no Claude Code impersonation. A Max token was verified against
- * api.anthropic.com to need none of it: bearer alone returns 200, with no
- * identity system prompt, no client fingerprint and no user-agent spoof. Only
- * the documented OAuth beta is added.
+ * That shaping is not optional. Measured against api.anthropic.com with one
+ * `max_tokens: 1` request, changing nothing but the shape:
+ *
+ *   bearer + oauth beta                          → 429 rate_limit_error
+ *   + user-agent, identity and billing blocks    → 200
+ *   …and again with meat's own lowercase tools   → 200
+ *
+ * Tool names are therefore left alone; only the headers and the system blocks
+ * matter. An earlier build sent bearer alone, which is why a subscription login
+ * hit "after 4 attempts: anthropic API 429".
  */
 const ANTHROPIC = "https://api.anthropic.com"
-const OAUTH_BETA = "oauth-2025-04-20"
 const HOST = "127.0.0.1"
+
+/**
+ * Mirrors `@suiramdev/opencode-anthropic-auth` (`src/constants.ts`, `src/cch.ts`,
+ * `prependClaudeCodeIdentity` in `src/transform.ts`), which owns this handshake
+ * for OpenCode's own requests.
+ *
+ * Copied rather than imported: that plugin exports only its entry and provider,
+ * and it is installed in OpenCode's plugin cache, a different tree from this
+ * package. Keep the two in step — a client version Anthropic stops recognising
+ * comes back as a rate-limit error, not as an authentication one.
+ */
+const CLAUDE_CODE = {
+  version: "2.1.87",
+  entrypoint: "sdk-cli",
+  agent: "claude-cli/2.1.87 (external, cli)",
+  identity: "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+  salt: "59cf53e54c78",
+  positions: [4, 7, 20],
+  betas: ["oauth-2025-04-20", "interleaved-thinking-2025-05-14"],
+} as const
 
 /** What OpenCode holds. `oauth` needs a bearer; a minted key stays an `x-api-key`. */
 export interface Secret {
@@ -194,11 +221,15 @@ async function handle(request: IncomingMessage, response: ServerResponse, key: s
   const upstream = await fetch(new URL(request.url ?? "/", ANTHROPIC), {
     method: request.method ?? "POST",
     headers: forward(request.headers, secret),
-    ...(body.length > 0 ? { body } : {}),
+    ...(body.length > 0 ? { body: secret.kind === "oauth" ? shape(body) : body } : {}),
   })
 
   response.writeHead(upstream.status, {
     "content-type": upstream.headers.get("content-type") ?? "application/json",
+    // Kept so a throttled run can be diagnosed from meat's own output.
+    ...Object.fromEntries(
+      [...upstream.headers].filter(([name]) => name === "retry-after" || name.startsWith("anthropic-ratelimit")),
+    ),
   })
   const reader = upstream.body?.getReader()
   if (!reader) {
@@ -219,14 +250,81 @@ function forward(headers: IncomingHttpHeaders, secret: Secret): Record<string, s
     // meat sets this itself; kept verbatim so the relay never picks the API version.
     "anthropic-version": single(headers["anthropic-version"]) ?? "2023-06-01",
   }
-  if (secret.kind === "oauth") {
-    out["authorization"] = `Bearer ${secret.value}`
-    const betas = single(headers["anthropic-beta"])
-    out["anthropic-beta"] = betas ? [...new Set([OAUTH_BETA, ...betas.split(",").map((b) => b.trim())])].join(",") : OAUTH_BETA
-  } else {
+  if (secret.kind !== "oauth") {
+    // A minted console key is an ordinary API key: authenticate and stay out of
+    // the way. None of the subscription handshake applies.
     out["x-api-key"] = secret.value
+    return out
   }
+  out["authorization"] = `Bearer ${secret.value}`
+  out["user-agent"] = CLAUDE_CODE.agent
+  const betas = single(headers["anthropic-beta"])
+  out["anthropic-beta"] = [
+    ...new Set([...CLAUDE_CODE.betas, ...(betas ?? "").split(",").map((beta) => beta.trim()).filter(Boolean)]),
+  ].join(",")
   return out
+}
+
+/**
+ * Prepends the two system blocks a subscription request is expected to carry:
+ * the billing header, then the client identity, then whatever meat asked for.
+ *
+ * Left untouched on anything unparseable — a body this relay does not understand
+ * is still a body Anthropic might.
+ */
+function shape(body: Buffer): Buffer {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body.toString("utf8"))
+  } catch {
+    return body
+  }
+  if (!isRecord(parsed)) return body
+
+  const system: unknown[] = [
+    { type: "text", text: billing(parsed["messages"]) },
+    { type: "text", text: CLAUDE_CODE.identity },
+  ]
+  // meat sends `system` as a plain string (`antReq` in meat/anthropic.go); an
+  // array is accepted too, so this stays useful if that ever changes.
+  const own = parsed["system"]
+  if (typeof own === "string" && own.length > 0) system.push({ type: "text", text: own })
+  else if (Array.isArray(own)) system.push(...own.filter((block) => isRecord(block)))
+
+  return Buffer.from(JSON.stringify({ ...parsed, system }), "utf8")
+}
+
+/** `cch` ties the request to its first user message, the way the client does. */
+function billing(messages: unknown): string {
+  const text = firstUserText(messages)
+  const sampled = CLAUDE_CODE.positions.map((index) => text[index] ?? "0").join("")
+  const suffix = sha256(`${CLAUDE_CODE.salt}${sampled}${CLAUDE_CODE.version}`).slice(0, 3)
+  return (
+    "x-anthropic-billing-header: " +
+    `cc_version=${CLAUDE_CODE.version}.${suffix}; ` +
+    `cc_entrypoint=${CLAUDE_CODE.entrypoint}; ` +
+    `cch=${sha256(text).slice(0, 5)};`
+  )
+}
+
+function firstUserText(messages: unknown): string {
+  if (!Array.isArray(messages)) return ""
+  for (const message of messages) {
+    if (!isRecord(message) || message["role"] !== "user") continue
+    const content = message["content"]
+    if (typeof content === "string") return content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (!isRecord(block)) continue
+      const text = block["text"]
+      if (typeof text === "string") return text
+    }
+  }
+  return ""
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex")
 }
 
 function single(value: string | string[] | undefined): string | undefined {

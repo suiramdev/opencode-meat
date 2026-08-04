@@ -33,16 +33,15 @@ export default {
       ctx.ui.slot("app", () => <Commands ctx={ctx} />),
       // meat thinks in a subprocess and the user keeps typing, so its progress
       // belongs next to the prompt rather than in a window they'd have to sit in.
-      ctx.ui.slot("session.composer.top", () => <Notices ctx={ctx} />),
+      ctx.ui.slot("session.composer.top", () => <Notices ctx={ctx} anchor="composer" />),
       // The welcome page has no composer, and `home.footer` is a single-winner
-      // slot a built-in already claims — so nothing rendered there. The prompt's
-      // own footer belongs to the prompt itself, which the welcome page mounts
-      // too. Its `sessionID` is what tells the two apart: absent on the welcome
-      // page, present in a session, where the roomier notice above the composer
-      // already says the same thing.
-      ctx.ui.slot("prompt.footer.end", (props) => (
-        <Notices ctx={ctx} compact suppressed={props.sessionID !== undefined} />
-      )),
+      // slot a built-in already claims, so nothing rendered there. The prompt's
+      // own footer belongs to the prompt, which the welcome page mounts too.
+      //
+      // Which of the two shows is decided by what is mounted, not by the props:
+      // gating this on `sessionID` assumed the welcome page passes none, and it
+      // left the welcome page with no notice at all.
+      ctx.ui.slot("prompt.footer.end", () => <Notices ctx={ctx} anchor="prompt" />),
     ]
     return () => {
       for (const unslot of slots) unslot()
@@ -54,6 +53,24 @@ export default {
 
 function Commands(props: { readonly ctx: Plugin.Context }) {
   const [stored, store] = props.ctx.storage.store("model", { initial: { ref: "" } })
+
+  // The notice is the normal channel, but it lives next to a prompt the user may
+  // not be looking at — and a failed read that says nothing anywhere reads as a
+  // plugin that silently does nothing. This slot is always mounted, so a toast
+  // from here always lands.
+  const announced = new Set<string>()
+  createEffect(() => {
+    for (const run of Runs.list()) {
+      const phase = run.phase()
+      if (phase.status !== "failed" || announced.has(run.id)) continue
+      announced.add(run.id)
+      props.ctx.ui.toast.show({
+        variant: "error",
+        title: `meat · ${describeTarget(run.target)}`,
+        message: firstLine(phase.message),
+      })
+    }
+  })
 
   props.ctx.keymap.layer(() => ({
     mode: "global",
@@ -185,15 +202,25 @@ function returnable(ctx: Plugin.Context): Runs.Destination {
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 const TICK_MS = 100
 
-function Notices(props: {
-  readonly ctx: Plugin.Context
-  readonly compact?: boolean
-  /** Set by the caller that knows it is duplicating another slot's notice. */
-  readonly suppressed?: boolean
-}) {
-  const visible = createMemo(() =>
-    props.suppressed === true ? [] : Runs.list().filter((run) => !run.dismissed()),
-  )
+/**
+ * How many composer notices are mounted. A session shows the roomy notice above
+ * its composer; the prompt footer is the fallback for routes that have no
+ * composer, and stays quiet whenever the composer one is up. Mount state is used
+ * rather than the route or the slot props because it is the thing actually being
+ * avoided: two notices saying the same sentence.
+ */
+const [composers, setComposers] = createSignal(0)
+
+function Notices(props: { readonly ctx: Plugin.Context; readonly anchor: "composer" | "prompt" }) {
+  const compact = () => props.anchor === "prompt"
+  if (props.anchor === "composer") {
+    setComposers((count) => count + 1)
+    onCleanup(() => setComposers((count) => count - 1))
+  }
+  const visible = createMemo(() => {
+    if (compact() && composers() > 0) return []
+    return Runs.list().filter((run) => !run.dismissed())
+  })
   const reading = createMemo(() => visible().some((run) => run.phase().status === "reading"))
   // One clock for every notice; the spinner frame and each elapsed time fall out
   // of it, and it only ticks while something is actually being read.
@@ -210,14 +237,12 @@ function Notices(props: {
     <Show when={visible().length}>
       <box
         flexDirection="column"
-        paddingLeft={props.compact === true ? 0 : 3}
-        paddingRight={props.compact === true ? 0 : 3}
-        paddingBottom={props.compact === true ? 0 : 1}
+        paddingLeft={compact() ? 0 : 3}
+        paddingRight={compact() ? 0 : 3}
+        paddingBottom={compact() ? 0 : 1}
       >
         <For each={visible()}>
-          {(run) => (
-            <Notice ctx={props.ctx} run={run} now={now} hint={hint} compact={props.compact === true} />
-          )}
+          {(run) => <Notice ctx={props.ctx} run={run} now={now} hint={hint} compact={compact()} />}
         </For>
       </box>
     </Show>
