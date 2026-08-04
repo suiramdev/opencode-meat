@@ -4,6 +4,8 @@
     "lib": ["esnext"],
     "module": "esnext",
     "moduleResolution": "bundler",
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
     "types": ["node"],
     "strict": true,
     "noUncheckedIndexedAccess": true,

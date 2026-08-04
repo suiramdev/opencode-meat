@@ -1,5 +1,7 @@
 {
-  // Local smoke-test setup: load this repo's plugin from source.
+  // Local smoke-test setup: the server half is loaded from source here, and the
+  // TUI half from .opencode/plugins/tui/meat.ts — OpenCode only discovers TUI
+  // plugins in that directory or through an npm package's "./tui" export.
   "$schema": "https://opencode.ai/config.json",
   "plugins": [{ "package": "./src/index.ts", "options": {} }]
 }
