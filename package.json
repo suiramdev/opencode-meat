@@ -1,0 +1,28 @@
+{
+  "name": "opencode-meat",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "description": "Run meat.dev reading diffs inside OpenCode",
+  "license": "MIT",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "meat",
+    "diff"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "next"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^7.0.2"
+  }
+}

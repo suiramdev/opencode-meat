@@ -1,0 +1,5 @@
+{
+  // Local smoke-test setup: load this repo's plugin from source.
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [{ "package": "./src/index.ts", "options": {} }]
+}
