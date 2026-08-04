@@ -23,6 +23,7 @@ export type Plan = Invocation | undefined
 
 const ANTHROPIC_PREFIX = "anthropic/"
 const ANTHROPIC_PACKAGE = "@ai-sdk/anthropic"
+const ANTHROPIC_PROVIDER = "anthropic"
 const OPENAI_DEFAULT_BASE_URL = "https://api.openai.com"
 const ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 
@@ -37,11 +38,16 @@ export function planInvocation(model: ModelInfo, provider: ProviderInfo | undefi
   const headers = { ...provider?.headers, ...model.headers }
   const baseURL = typeof settings["baseURL"] === "string" ? settings["baseURL"] : undefined
   const key = apiKey(settings, headers)
-  // OpenCode qualifies the package with its loader ("aisdk:@ai-sdk/anthropic").
+  // Two signals, because neither alone is enough. The canonical provider id is
+  // api.anthropic.com whatever module serves it — an OAuth wrapper reports a
+  // file:// URL as its package. And a provider like Kimi For Coding speaks the
+  // Anthropic Messages API under its own id, which only the package reveals.
+  // (OpenCode qualifies packages with their loader: "aisdk:@ai-sdk/anthropic".)
   const pkg = model.package ?? provider?.package ?? ""
-  const anthropicPackage = pkg.slice(pkg.lastIndexOf(":") + 1) === ANTHROPIC_PACKAGE
+  const anthropicEndpoint =
+    model.providerID === ANTHROPIC_PROVIDER || pkg.slice(pkg.lastIndexOf(":") + 1) === ANTHROPIC_PACKAGE
 
-  if (anthropicPackage) {
+  if (anthropicEndpoint) {
     // The provider speaks Anthropic Messages but meat would dial the OpenAI
     // Responses API for this id, and nothing in its CLI can override that.
     if (!routesToAnthropic(model.modelID)) return undefined

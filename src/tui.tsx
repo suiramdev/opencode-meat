@@ -171,11 +171,19 @@ async function pickModel(ctx: Plugin.Context, config: MeatConfig, remembered: st
       // override a provider meat cannot be taught about.
       config: { ...config, model: plan.model, env: { ...plan.env, ...config.env } },
     })
+    // OpenCode hides credentials it injects at request time (OAuth logins, for
+    // instance), so say which variable meat will fall back to rather than let it
+    // look like the model is simply broken.
+    const variable = plan.transport === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"
+    const transport = plan.transport === "anthropic" ? "Anthropic Messages" : "OpenAI Responses"
     options.push({
       title: model.name,
       value: model.id,
       category,
-      description: `${plan.transport === "anthropic" ? "Anthropic Messages" : "OpenAI Responses"} · ${plan.model}`,
+      description:
+        variable in plan.env
+          ? `${transport} · ${plan.model}`
+          : `${transport} · ${plan.model} · needs $${variable}`,
     })
   }
 

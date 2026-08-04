@@ -32,7 +32,7 @@ wherever `OPENCODE_CONFIG_DIR` points).
 {
   "name": "opencode-config",
   "private": true,
-  "dependencies": { "@suiramdev/opencode-meat": "^0.2.1" }
+  "dependencies": { "@suiramdev/opencode-meat": "^0.2.2" }
 }
 ```
 
@@ -87,9 +87,18 @@ environment for the subprocess:
 
 | Provider                                   | meat sees                                                                       |
 | ------------------------------------------ | ------------------------------------------------------------------------------- |
-| Anthropic, or any `@ai-sdk/anthropic` provider with a `claude-…` id | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` (a trailing `/v1` is trimmed, because meat appends `/v1/messages`) |
+| Provider id `anthropic`, or any provider loading `@ai-sdk/anthropic`, with a `claude-…` id | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` (a trailing `/v1` is trimmed, because meat appends `/v1/messages`) |
 | OpenAI                                     | `OPENAI_API_KEY`                                                                  |
 | Any OpenAI-compatible gateway (OpenCode Zen, OpenRouter, a local proxy…) | `OPENAI_API_KEY`, `OPENAI_BASE_URL` from the provider's catalog entry |
+
+Both signals matter. The provider id is checked because a provider served by a custom
+module — an OAuth login plugin, say — reports a `file://` URL as its package; the package is
+checked because providers like Kimi For Coding speak the Anthropic Messages API under their
+own id.
+
+A key is passed only when OpenCode exposes one. Credentials it injects at request time,
+such as an OAuth login, are invisible here, so those entries read `needs $ANTHROPIC_API_KEY`
+and meat falls back to your environment.
 
 Two combinations cannot be expressed and are left out of the picker, which reports how many
 it hid:
