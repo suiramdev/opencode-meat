@@ -20,16 +20,39 @@ go install meat.dev/cmd/meat@latest
 
 ## Install
 
+The plugin has two halves — a server-side tool and the TUI window — and OpenCode
+discovers them differently. Naming the package in `opencode.json`'s `plugins` array loads
+**only the server half**: as of `0.0.0-next-16741` the TUI plugin loader reads
+`<config>/plugins/tui/` and `<project>/.opencode/plugins/tui/` and nothing else. So install
+by dropping two one-line files into your config directory (`~/.config/opencode`, or
+wherever `OPENCODE_CONFIG_DIR` points).
+
 ```jsonc
-// opencode.jsonc
+// <config>/package.json — OpenCode runs an install here at startup
 {
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": ["@suiramdev/opencode-meat"]
+  "name": "opencode-config",
+  "private": true,
+  "dependencies": { "@suiramdev/opencode-meat": "^0.2.1" }
 }
 ```
 
-The package ships two halves: the default export is the server-side tool, and the `./tui`
-export is the window. OpenCode loads both automatically from an npm install.
+```ts
+// <config>/plugins/meat.ts — the tool
+export { default } from "@suiramdev/opencode-meat"
+```
+
+```ts
+// <config>/plugins/tui/meat.ts — the window
+export { default } from "@suiramdev/opencode-meat/tui"
+```
+
+Leave the package **out** of `opencode.json`'s `plugins` array: these two files already
+load both halves from one install, and a config entry would install a second copy.
+
+The `package.json` is not optional. The window is a Solid component, so its module has to
+resolve `@opentui/solid` and `solid-js`; they arrive as peer dependencies of this package,
+but only if something installs it into a `node_modules` the plugin file can see. A plugin
+file with no reachable `node_modules` fails with `Cannot find package 'solid-js'`.
 
 ## Usage
 
@@ -117,9 +140,9 @@ on an unchanged diff is instant. `noCache: true` forces a recompute.
 
 ## Local development
 
-OpenCode discovers TUI plugins from `<config>/plugins/tui/` and from an npm package's
-`./tui` export — a plugin named by file path in `plugins` only ever loads its server half.
-This repo therefore wires both:
+A checkout wires the same two halves, but from source. The TUI file resolves `solid-js` and
+`@opentui/solid` out of this repo's own `node_modules`, which is why they are devDependencies
+here:
 
 ```jsonc
 // opencode.jsonc — server half
