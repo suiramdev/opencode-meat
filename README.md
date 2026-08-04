@@ -34,7 +34,7 @@ wherever `OPENCODE_CONFIG_DIR` points).
 {
   "name": "opencode-config",
   "private": true,
-  "dependencies": { "@suiramdev/opencode-meat": "^0.3.0" }
+  "dependencies": { "@suiramdev/opencode-meat": "^0.4.0" }
 }
 ```
 
@@ -70,12 +70,19 @@ file with no reachable `node_modules` fails with `Cannot find package 'solid-js'
 subprocess, no window. Picking a model starts `meat` and hands the prompt straight back:
 nothing takes over the screen, and the choice is remembered for next time.
 
-While meat reads, a line above the prompt keeps count, and you can keep typing and sending
-prompts past it:
+While meat reads, a line by the prompt keeps count, and you can keep typing and sending
+prompts past it. In a session it sits above the composer:
 
 ```
 ⠙ meat is reading HEAD~3 · 12s
 meat read HEAD~3 · ctrl+x d to open
+```
+
+The welcome page has no composer, so the same notice appears in the prompt's own footer,
+shortened to fit:
+
+```
+⠙ meat HEAD~3 · 12s        meat HEAD~3 · ctrl+x d
 ```
 
 Several reads can be in flight at once; each gets its own line.
@@ -122,9 +129,9 @@ module — an OAuth login plugin, say — reports a `file://` URL as its package
 checked because providers like Kimi For Coding speak the Anthropic Messages API under their
 own id.
 
-A key is passed only when OpenCode exposes one. Credentials it injects at request time,
-such as an OAuth login, are invisible here, so those entries read `needs $ANTHROPIC_API_KEY`
-and meat falls back to your environment.
+A key is passed when OpenCode exposes one. When it does not — a Claude Pro/Max login, or
+any credential OpenCode injects at request time — the entry reads
+`through your OpenCode login` and the call goes through the relay below.
 
 Two combinations cannot be expressed and are left out of the picker, which reports how many
 it hid:
@@ -139,6 +146,33 @@ or its own default with whatever credentials are already in your environment.
 
 Gateways that implement `/v1/chat/completions` but not `/v1/responses` are offered but will
 fail; meat's own error is shown in the window.
+
+## Subscription logins (Claude Pro/Max)
+
+meat authenticates with `x-api-key` and nothing else (`meat/anthropic.go`), and Anthropic
+answers `401 invalid x-api-key` when that header carries a subscription OAuth token. That is
+the failure behind `meat: AnthropicModel.APIKey is empty` on a setup like
+[`@suiramdev/opencode-anthropic-auth`](https://github.com/suiramdev/opencode-anthropic-auth):
+the credential exists, but it is not a key and OpenCode never hands it to the TUI anyway.
+
+So the plugin's **server half** starts a loopback relay and the TUI points meat at it:
+
+```
+meat ──x-api-key: <local secret>──▶ 127.0.0.1:<port> ──Authorization: Bearer <token>──▶ api.anthropic.com
+```
+
+- The token is resolved **per request** from OpenCode's own credential store, so its refresh
+  near expiry is picked up and no token is ever cached by this plugin.
+- A minted key (that plugin's *Create an API Key* flow stores one in an OAuth-shaped
+  credential) is forwarded as `x-api-key` instead, because that is what it is.
+- The relay binds loopback only and requires a random per-run secret, which is what meat
+  sends as its `x-api-key`. Without it no other local process can spend your subscription.
+- **No Claude Code impersonation.** A Max token was checked against `api.anthropic.com` and
+  needs none: bearer alone returns 200, with no identity system prompt, no client
+  fingerprint and no user-agent spoof. Only the documented `oauth-2025-04-20` beta is added.
+
+This needs both halves installed (the server half holds the credential, the TUI spawns
+meat). With only the window installed, keyless entries fall back to your environment.
 
 ## Options
 

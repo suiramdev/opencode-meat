@@ -13,6 +13,7 @@ import {
   type MeatResult,
   type Target,
 } from "./meat.js"
+import * as OAuth from "./oauth.js"
 import { planInvocation } from "./provider.js"
 import * as Runs from "./runs.js"
 
@@ -31,10 +32,17 @@ export default {
       // from every route, exactly like the built-in diff viewer.
       ctx.ui.slot("app", () => <Commands ctx={ctx} />),
       // meat thinks in a subprocess and the user keeps typing, so its progress
-      // belongs directly above the prompt rather than in a window they'd have to
-      // sit in. The home slot covers the route with no composer.
+      // belongs next to the prompt rather than in a window they'd have to sit in.
       ctx.ui.slot("session.composer.top", () => <Notices ctx={ctx} />),
-      ctx.ui.slot("home.footer", () => <Notices ctx={ctx} />),
+      // The welcome page has no composer, and `home.footer` is a single-winner
+      // slot a built-in already claims — so nothing rendered there. The prompt's
+      // own footer belongs to the prompt itself, which the welcome page mounts
+      // too. Its `sessionID` is what tells the two apart: absent on the welcome
+      // page, present in a session, where the roomier notice above the composer
+      // already says the same thing.
+      ctx.ui.slot("prompt.footer.end", (props) => (
+        <Notices ctx={ctx} compact suppressed={props.sessionID !== undefined} />
+      )),
     ]
     return () => {
       for (const unslot of slots) unslot()
@@ -177,8 +185,15 @@ function returnable(ctx: Plugin.Context): Runs.Destination {
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 const TICK_MS = 100
 
-function Notices(props: { readonly ctx: Plugin.Context }) {
-  const visible = createMemo(() => Runs.list().filter((run) => !run.dismissed()))
+function Notices(props: {
+  readonly ctx: Plugin.Context
+  readonly compact?: boolean
+  /** Set by the caller that knows it is duplicating another slot's notice. */
+  readonly suppressed?: boolean
+}) {
+  const visible = createMemo(() =>
+    props.suppressed === true ? [] : Runs.list().filter((run) => !run.dismissed()),
+  )
   const reading = createMemo(() => visible().some((run) => run.phase().status === "reading"))
   // One clock for every notice; the spinner frame and each elapsed time fall out
   // of it, and it only ticks while something is actually being read.
@@ -193,8 +208,17 @@ function Notices(props: { readonly ctx: Plugin.Context }) {
 
   return (
     <Show when={visible().length}>
-      <box flexDirection="column" paddingLeft={3} paddingRight={3} paddingBottom={1}>
-        <For each={visible()}>{(run) => <Notice ctx={props.ctx} run={run} now={now} hint={hint} />}</For>
+      <box
+        flexDirection="column"
+        paddingLeft={props.compact === true ? 0 : 3}
+        paddingRight={props.compact === true ? 0 : 3}
+        paddingBottom={props.compact === true ? 0 : 1}
+      >
+        <For each={visible()}>
+          {(run) => (
+            <Notice ctx={props.ctx} run={run} now={now} hint={hint} compact={props.compact === true} />
+          )}
+        </For>
       </box>
     </Show>
   )
@@ -205,6 +229,7 @@ function Notice(props: {
   readonly run: Runs.Run
   readonly now: () => number
   readonly hint: () => string
+  readonly compact: boolean
 }) {
   const theme = () => props.ctx.theme
   const target = () => describeTarget(props.run.target)
@@ -213,11 +238,15 @@ function Notice(props: {
     return phase.status === "failed" ? firstLine(phase.message) : undefined
   })
   const label = createMemo(() => {
-    if (props.run.phase().status === "reading") {
+    const phase = props.run.phase()
+    if (phase.status === "reading") {
       const frame = SPINNER[Math.floor(props.now() / TICK_MS) % SPINNER.length]
-      return `${frame} meat is reading ${target()} · ${elapsed(props.now() - props.run.startedAt)}`
+      const age = elapsed(props.now() - props.run.startedAt)
+      return props.compact
+        ? `${frame} meat ${target()} · ${age}`
+        : `${frame} meat is reading ${target()} · ${age}`
     }
-    return `meat read ${target()} · ${props.hint()} to open`
+    return props.compact ? `meat ${target()} · ${props.hint()}` : `meat read ${target()} · ${props.hint()} to open`
   })
 
   return (
@@ -260,10 +289,19 @@ async function pickModel(ctx: Plugin.Context, config: MeatConfig, remembered: st
   const providers = new Map<string, ProviderInfo>()
   for (const provider of ctx.data.location.provider.list(location) ?? []) providers.set(provider.id, provider)
 
+  // Published by the server half whenever OpenCode holds an Anthropic credential
+  // it never hands out — an OAuth subscription login, above all.
+  const relay = OAuth.published()
+  // meat's built-in default is a Claude model, so the default entry needs the
+  // relay just as much as an explicitly picked one.
+  const fallbackEnv =
+    relay && !("ANTHROPIC_API_KEY" in config.env)
+      ? { ANTHROPIC_BASE_URL: relay.url, ANTHROPIC_API_KEY: relay.key, ...config.env }
+      : config.env
   const fallback: Choice = {
     ref: DEFAULT_MODEL,
     label: config.model ?? "meat default",
-    config,
+    config: { ...config, env: fallbackEnv },
   }
   const choices = new Map<string, Choice>([[fallback.ref, fallback]])
   const options: Array<{ title: string; value: string; category?: string; description?: string }> = [
@@ -290,24 +328,27 @@ async function pickModel(ctx: Plugin.Context, config: MeatConfig, remembered: st
       continue
     }
     const category = provider?.name ?? model.providerID
+    // A login whose credential OpenCode injects at request time (Claude Pro/Max,
+    // for instance) exposes no key here, and meat only speaks `x-api-key`. The
+    // relay carries those; without one there is nothing to send.
+    const relayed = plan.transport === "anthropic" && !("ANTHROPIC_API_KEY" in plan.env) && relay !== undefined
+    const env = relayed ? { ...plan.env, ANTHROPIC_BASE_URL: relay.url, ANTHROPIC_API_KEY: relay.key } : plan.env
     choices.set(model.id, {
       ref: model.id,
       label: `${category} / ${model.name}`,
       // Plugin options win over the derived transport so a user can always
       // override a provider meat cannot be taught about.
-      config: { ...config, model: plan.model, env: { ...plan.env, ...config.env } },
+      config: { ...config, model: plan.model, env: { ...env, ...config.env } },
     })
-    // OpenCode hides credentials it injects at request time (OAuth logins, for
-    // instance), so say which variable meat will fall back to rather than let it
-    // look like the model is simply broken.
     const variable = plan.transport === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"
     const transport = plan.transport === "anthropic" ? "Anthropic Messages" : "OpenAI Responses"
     options.push({
       title: model.name,
       value: model.id,
       category,
-      description:
-        variable in plan.env
+      description: relayed
+        ? `${transport} · ${plan.model} · through your OpenCode login`
+        : variable in plan.env
           ? `${transport} · ${plan.model}`
           : `${transport} · ${plan.model} · needs $${variable}`,
     })
