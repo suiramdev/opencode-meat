@@ -23,7 +23,7 @@ You also need credentials for whichever model meat should use (see [Options](#op
 // opencode.jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-meat"]
+  "plugins": ["@suiramdev/opencode-meat"]
 }
 ```
 
@@ -51,7 +51,7 @@ Anthropic, credentials from the ambient environment:
 ```jsonc
 {
   "plugins": [
-    { "package": "opencode-meat", "options": { "model": "claude-sonnet-4-5" } }
+    { "package": "@suiramdev/opencode-meat", "options": { "model": "claude-sonnet-4-5" } }
   ]
 }
 ```
@@ -62,7 +62,7 @@ An OpenAI-compatible endpoint (Cursor, OpenRouter, a local gateway…):
 {
   "plugins": [
     {
-      "package": "opencode-meat",
+      "package": "@suiramdev/opencode-meat",
       "options": {
         "model": "gpt-5.1-codex",
         "env": {

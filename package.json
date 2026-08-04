@@ -1,10 +1,22 @@
 {
-  "name": "opencode-meat",
+  "name": "@suiramdev/opencode-meat",
   "version": "0.1.0",
   "type": "module",
   "exports": "./src/index.ts",
   "description": "Run meat.dev reading diffs inside OpenCode",
   "license": "MIT",
+  "author": "suiramdev <me@suiram.dev>",
+  "homepage": "https://github.com/suiramdev/opencode-meat#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/suiramdev/opencode-meat.git"
+  },
+  "bugs": {
+    "url": "https://github.com/suiramdev/opencode-meat/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "src",
     "README.md"
