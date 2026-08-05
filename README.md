@@ -262,10 +262,26 @@ export { default } from "../../../src/tui.js"
 
 `bun run typecheck` checks both.
 
-Load one copy or the other, never both: the published package in your config directory and
-a checkout wired here register the same commands and the same slot, and a read started by
-one is invisible to the other. Rename `<config>/plugins/tui/meat.ts` out of the way while
-you work on a checkout.
+Load one copy or the other, never both — and move **both** shims out of the way, not just
+the window:
+
+```sh
+rm <config>/plugins/meat.ts <config>/plugins/tui/meat.ts
+```
+
+The TUI half is the mild collision: two copies register the same commands and the same
+slot, and a read started by one is invisible to the other. The **server** half is fatal.
+Both copies define the plugin id `meat`, and a duplicate id does not skip the second
+plugin — it aborts the whole set for that directory:
+
+```
+ERROR failed to reload plugins cause="Die(Error: Duplicate plugin ID: meat)"
+```
+
+Every other plugin goes down with it, an authentication plugin included, so the symptom is
+a checkout that reports no integrations and no login while every other directory is fine.
+A set that already registered is never torn down, so a directory that loaded cleanly once
+keeps working until the next server restart — which is what makes this look intermittent.
 
 Any module of this plugin that touches Solid has to be `.tsx`, JSX or no JSX. OpenCode hands
 plugins its own Solid runtime by rewriting their `solid-js` imports, but the rewrite a local
