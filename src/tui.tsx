@@ -1,8 +1,11 @@
 /** @jsxImportSource @opentui/solid */
 import type { ModelInfo, ProviderInfo } from "@opencode-ai/client"
 import type { Plugin } from "@opencode-ai/plugin/tui"
-import type { ScrollBoxRenderable } from "@opentui/core"
+import { generateSyntax } from "@opencode-ai/theme/tui"
+import type { ScrollBoxRenderable, SyntaxStyle } from "@opentui/core"
+import { useTerminalDimensions } from "@opentui/solid"
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
+import { readingDiff, type ReadingFile } from "./diff.js"
 import {
   describeTarget,
   errorMessage,
@@ -33,15 +36,13 @@ export default {
       ctx.ui.slot("app", () => <Commands ctx={ctx} />),
       // meat thinks in a subprocess and the user keeps typing, so its progress
       // belongs next to the prompt rather than in a window they'd have to sit in.
-      ctx.ui.slot("session.composer.top", () => <Notices ctx={ctx} anchor="composer" />),
-      // The welcome page has no composer, and `home.footer` is a single-winner
-      // slot a built-in already claims, so nothing rendered there. The prompt's
-      // own footer belongs to the prompt, which the welcome page mounts too.
       //
-      // Which of the two shows is decided by what is mounted, not by the props:
-      // gating this on `sessionID` assumed the welcome page passes none, and it
-      // left the welcome page with no notice at all.
-      ctx.ui.slot("prompt.footer.end", () => <Notices ctx={ctx} anchor="prompt" />),
+      // This is the only additive prompt-side slot. `prompt.footer.end` and
+      // `home.footer` are `replace` slots a built-in already claims — mounting
+      // there wins the slot and silently deletes OpenCode's own footer (context
+      // usage, cost, subagent and shell counts). Routes with no composer are
+      // covered by the toasts in `Commands` instead.
+      ctx.ui.slot("session.composer.top", () => <Notices ctx={ctx} />),
     ]
     return () => {
       for (const unslot of slots) unslot()
@@ -54,20 +55,29 @@ export default {
 function Commands(props: { readonly ctx: Plugin.Context }) {
   const [stored, store] = props.ctx.storage.store("model", { initial: { ref: "" } })
 
-  // The notice is the normal channel, but it lives next to a prompt the user may
-  // not be looking at — and a failed read that says nothing anywhere reads as a
-  // plugin that silently does nothing. This slot is always mounted, so a toast
-  // from here always lands.
+  // The notice is the normal channel, but it lives above a composer the user may
+  // not be looking at — and on routes with no composer there is no notice at all.
+  // This slot is always mounted, so a toast from here always lands, whichever
+  // route is up.
   const announced = new Set<string>()
   createEffect(() => {
     for (const run of Runs.list()) {
       const phase = run.phase()
-      if (phase.status !== "failed" || announced.has(run.id)) continue
+      if (phase.status === "reading" || announced.has(run.id)) continue
       announced.add(run.id)
+      if (phase.status === "failed") {
+        props.ctx.ui.toast.show({
+          variant: "error",
+          title: `meat · ${describeTarget(run.target)}`,
+          message: firstLine(phase.message),
+        })
+        continue
+      }
       props.ctx.ui.toast.show({
-        variant: "error",
-        title: `meat · ${describeTarget(run.target)}`,
-        message: firstLine(phase.message),
+        variant: "success",
+        title: `meat read ${describeTarget(run.target)}`,
+        // The whole point of the toast: say how to read what was just read.
+        message: `${openHint(props.ctx)} to open · ${firstLine(phase.result.summary)}`,
       })
     }
   })
@@ -202,25 +212,8 @@ function returnable(ctx: Plugin.Context): Runs.Destination {
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 const TICK_MS = 100
 
-/**
- * How many composer notices are mounted. A session shows the roomy notice above
- * its composer; the prompt footer is the fallback for routes that have no
- * composer, and stays quiet whenever the composer one is up. Mount state is used
- * rather than the route or the slot props because it is the thing actually being
- * avoided: two notices saying the same sentence.
- */
-const [composers, setComposers] = createSignal(0)
-
-function Notices(props: { readonly ctx: Plugin.Context; readonly anchor: "composer" | "prompt" }) {
-  const compact = () => props.anchor === "prompt"
-  if (props.anchor === "composer") {
-    setComposers((count) => count + 1)
-    onCleanup(() => setComposers((count) => count - 1))
-  }
-  const visible = createMemo(() => {
-    if (compact() && composers() > 0) return []
-    return Runs.list().filter((run) => !run.dismissed())
-  })
+function Notices(props: { readonly ctx: Plugin.Context }) {
+  const visible = createMemo(() => Runs.list().filter((run) => !run.dismissed()))
   const reading = createMemo(() => visible().some((run) => run.phase().status === "reading"))
   // One clock for every notice; the spinner frame and each elapsed time fall out
   // of it, and it only ticks while something is actually being read.
@@ -230,66 +223,52 @@ function Notices(props: { readonly ctx: Plugin.Context; readonly anchor: "compos
     const timer = setInterval(() => setNow(Date.now()), TICK_MS)
     onCleanup(() => clearInterval(timer))
   })
-  // Read from the keymap so a rebound (or unbound) shortcut still reads true.
-  const hint = createMemo(() => props.ctx.keymap.shortcuts("meat.show")[0] ?? "/meat-diff")
 
   return (
     <Show when={visible().length}>
-      <box
-        flexDirection="column"
-        paddingLeft={compact() ? 0 : 3}
-        paddingRight={compact() ? 0 : 3}
-        paddingBottom={compact() ? 0 : 1}
-      >
-        <For each={visible()}>
-          {(run) => <Notice ctx={props.ctx} run={run} now={now} hint={hint} compact={compact()} />}
-        </For>
+      <box flexDirection="column" paddingLeft={3} paddingRight={3} paddingBottom={1}>
+        <For each={visible()}>{(run) => <Notice ctx={props.ctx} run={run} now={now} />}</For>
       </box>
     </Show>
   )
 }
 
-function Notice(props: {
-  readonly ctx: Plugin.Context
-  readonly run: Runs.Run
-  readonly now: () => number
-  readonly hint: () => string
-  readonly compact: boolean
-}) {
+function Notice(props: { readonly ctx: Plugin.Context; readonly run: Runs.Run; readonly now: () => number }) {
   const theme = () => props.ctx.theme
   const target = () => describeTarget(props.run.target)
+  const phase = () => props.run.phase()
   const failure = createMemo(() => {
-    const phase = props.run.phase()
-    return phase.status === "failed" ? firstLine(phase.message) : undefined
-  })
-  const label = createMemo(() => {
-    const phase = props.run.phase()
-    if (phase.status === "reading") {
-      const frame = SPINNER[Math.floor(props.now() / TICK_MS) % SPINNER.length]
-      const age = elapsed(props.now() - props.run.startedAt)
-      return props.compact
-        ? `${frame} meat ${target()} · ${age}`
-        : `${frame} meat is reading ${target()} · ${age}`
-    }
-    return props.compact ? `meat ${target()} · ${props.hint()}` : `meat read ${target()} · ${props.hint()} to open`
+    const current = phase()
+    return current.status === "failed" ? firstLine(current.message) : undefined
   })
 
   return (
-    <Show
-      when={failure()}
-      fallback={
+    <Switch>
+      <Match when={phase().status === "reading"}>
         <text fg={theme().text.subdued} wrapMode="none">
-          {label()}
+          {SPINNER[Math.floor(props.now() / TICK_MS) % SPINNER.length]} meat is reading {target()} ·{" "}
+          {elapsed(props.now() - props.run.startedAt)}
         </text>
-      }
-    >
-      {(failed: () => string) => (
-        <text fg={theme().text.feedback.error.default} wrapMode="none">
-          meat failed on {target()} · {failed()}
+      </Match>
+      <Match when={failure()}>
+        {(failed: () => string) => (
+          <text fg={theme().text.feedback.error.default} wrapMode="none">
+            ✗ meat failed on {target()} · {failed()}
+          </text>
+        )}
+      </Match>
+      <Match when={phase().status === "ready"}>
+        <text fg={theme().text.feedback.success.default} wrapMode="none">
+          ✓ meat read {target()} · {openHint(props.ctx)} to open
         </text>
-      )}
-    </Show>
+      </Match>
+    </Switch>
   )
+}
+
+/** The live binding for `meat.show`, so a rebound (or unbound) shortcut reads true. */
+function openHint(ctx: Plugin.Context): string {
+  return ctx.keymap.shortcuts("meat.show")[0] ?? "/meat-diff"
 }
 
 function elapsed(ms: number): string {
@@ -400,15 +379,24 @@ function byProviderThenName(providers: ReadonlyMap<string, ProviderInfo>) {
   }
 }
 
+const MIN_SPLIT_WIDTH = 100
+
 function Page(props: { readonly ctx: Plugin.Context; readonly run: Runs.Run | undefined }) {
   const theme = () => props.ctx.theme.contextual.elevated
   const phase = () => props.run?.phase()
+  const dimensions = useTerminalDimensions()
   let scroll: ScrollBoxRenderable | undefined
 
   const close = () => {
     props.ctx.ui.dialog.clear()
     props.ctx.ui.router.navigate(props.run?.returnTo ?? { type: "home" })
   }
+
+  // Side by side needs room for two gutters and two columns of code; below that
+  // it reads worse than the unified view, so the toggle is not even offered.
+  const splittable = createMemo(() => dimensions().width >= MIN_SPLIT_WIDTH)
+  const [split, setSplit] = createSignal(true)
+  const view = createMemo<"split" | "unified">(() => (splittable() && split() ? "split" : "unified"))
 
   props.ctx.keymap.layer(() => ({
     commands: [
@@ -444,6 +432,14 @@ function Page(props: { readonly ctx: Plugin.Context; readonly run: Runs.Run | un
         bind: "g",
         run: () => scroll?.scrollTo(0),
       },
+      {
+        id: "meat.view",
+        title: "Toggle the meat diff between split and unified",
+        group: "Meat",
+        bind: "v",
+        enabled: () => splittable(),
+        run: () => void setSplit((current) => !current),
+      },
     ],
   }))
 
@@ -455,10 +451,11 @@ function Page(props: { readonly ctx: Plugin.Context; readonly run: Runs.Run | un
     const current = phase()
     return current?.status === "ready" ? current.result : undefined
   })
-  const lines = createMemo(() => {
+  const parsed = createMemo(() => {
     const current = result()
-    return current ? classify(current.smart_diff) : []
+    return current ? readingDiff(current.smart_diff) : undefined
   })
+  const syntax = syntaxStyle(props.ctx)
 
   return (
     <box flexGrow={1} minHeight={0} flexDirection="column">
@@ -509,20 +506,23 @@ function Page(props: { readonly ctx: Plugin.Context; readonly run: Runs.Run | un
                 verticalScrollbarOptions={{ visible: false }}
                 horizontalScrollbarOptions={{ visible: false }}
               >
+                <Show when={parsed()?.preamble}>
+                  {(preamble: () => string) => (
+                    <box paddingLeft={1} paddingBottom={1}>
+                      <text fg={theme().text.subdued}>{preamble()}</text>
+                    </box>
+                  )}
+                </Show>
                 <Show
-                  when={lines().length}
-                  fallback={<text fg={theme().text.subdued}>(no meaningful change to read)</text>}
+                  when={parsed()?.files.length}
+                  fallback={
+                    <Show when={!parsed()?.preamble}>
+                      <text fg={theme().text.subdued}>(no meaningful change to read)</text>
+                    </Show>
+                  }
                 >
-                  <For each={lines()}>
-                    {(line) => (
-                      <text
-                        fg={color(props.ctx, line.kind)}
-                        bg={background(props.ctx, line.kind)}
-                        wrapMode="none"
-                      >
-                        {line.text}
-                      </text>
-                    )}
+                  <For each={parsed()?.files ?? []}>
+                    {(file) => <File ctx={props.ctx} file={file} view={view()} syntax={syntax} />}
                   </For>
                 </Show>
               </scrollbox>
@@ -530,6 +530,9 @@ function Page(props: { readonly ctx: Plugin.Context; readonly run: Runs.Run | un
                 <text fg={theme().text.subdued}>j/k scroll</text>
                 <text fg={theme().text.subdued}>ctrl+f/b page</text>
                 <text fg={theme().text.subdued}>g top</text>
+                <Show when={splittable()}>
+                  <text fg={theme().text.subdued}>v {view() === "split" ? "unified" : "split"}</text>
+                </Show>
                 <text fg={theme().text.subdued}>esc close</text>
                 <box flexGrow={1} />
                 <text fg={theme().text.subdued}>
@@ -544,51 +547,91 @@ function Page(props: { readonly ctx: Plugin.Context; readonly run: Runs.Run | un
   )
 }
 
-type LineKind = "added" | "removed" | "hunk" | "file" | "context"
-
-interface Line {
-  readonly text: string
-  readonly kind: LineKind
+/**
+ * One file, rendered the way OpenCode's own diff viewer renders one: a header
+ * row, then one `<diff>` per hunk with the hunk's own `@@` line above it. Per
+ * hunk rather than per file because a single renderable would run the elided
+ * gaps together, and because that is what keeps each hunk's header on screen.
+ */
+function File(props: {
+  readonly ctx: Plugin.Context
+  readonly file: ReadingFile
+  readonly view: "split" | "unified"
+  readonly syntax: () => SyntaxStyle
+}) {
+  const theme = () => props.ctx.theme.contextual.elevated
+  return (
+    <box flexDirection="column" paddingBottom={1}>
+      <box flexDirection="row" gap={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
+        <text fg={theme().text.default}>{props.file.path}</text>
+        <box flexGrow={1} />
+        <text fg={theme().diff.text.added}>+{props.file.additions}</text>
+        <text fg={theme().diff.text.removed}>-{props.file.deletions}</text>
+      </box>
+      <Show
+        when={props.file.hunks.length}
+        fallback={
+          <text fg={theme().text.subdued} wrapMode="none">
+            {"  (no textual change)"}
+          </text>
+        }
+      >
+        <For each={props.file.hunks}>
+          {(hunk) => (
+            <box flexDirection="column">
+              <box width="100%" height={1} backgroundColor={theme().diff.background.context}>
+                <text fg={theme().diff.text.hunkHeader} bg={theme().diff.background.context} wrapMode="none">
+                  {` ${hunk.header}`}
+                </text>
+              </box>
+              <diff
+                diff={hunk.patch}
+                minHeight={hunk.rows}
+                view={props.view}
+                filetype={props.file.filetype}
+                syntaxStyle={props.syntax()}
+                showLineNumbers={true}
+                width="100%"
+                wrapMode="char"
+                fg={theme().text.default}
+                addedBg={theme().diff.background.added}
+                removedBg={theme().diff.background.removed}
+                contextBg={theme().diff.background.context}
+                addedSignColor={theme().diff.highlight.added}
+                removedSignColor={theme().diff.highlight.removed}
+                lineNumberFg={theme().diff.lineNumber.text}
+                lineNumberBg={theme().diff.background.context}
+                addedLineNumberBg={theme().diff.lineNumber.background.added}
+                removedLineNumberBg={theme().diff.lineNumber.background.removed}
+              />
+            </box>
+          )}
+        </For>
+      </Show>
+    </box>
+  )
 }
 
 /**
- * meat emits a *reading* diff: hunk counts are deliberately stale once elided
- * lines are dropped, so a real unified-diff parser would reject it. Classifying
- * by leading marker is both sufficient and immune to that.
+ * The syntax theme `<diff>` highlights with, built from the same tokens
+ * OpenCode builds its own from. It owns native memory, so the old one is only
+ * dropped once the renderer is done with the frame that still points at it.
  */
-function classify(diff: string): Line[] {
-  const trimmed = diff.replace(/\n+$/, "")
-  if (!trimmed) return []
-  return trimmed.split("\n").map((text) => {
-    if (text.startsWith("@@")) return { text, kind: "hunk" as const }
-    if (text.startsWith("+++") || text.startsWith("---") || text.startsWith("diff ") || text.startsWith("index ")) {
-      return { text, kind: "file" as const }
-    }
-    if (text.startsWith("+")) return { text, kind: "added" as const }
-    if (text.startsWith("-")) return { text, kind: "removed" as const }
-    return { text, kind: "context" as const }
+function syntaxStyle(ctx: Plugin.Context): () => SyntaxStyle {
+  const theme = () => ctx.theme.contextual.elevated
+  let current: SyntaxStyle | undefined
+  const release = (style: SyntaxStyle) => void ctx.renderer.idle().then(
+    () => style.destroy(),
+    () => {},
+  )
+  onCleanup(() => {
+    if (current) release(current)
   })
-}
-
-function color(ctx: Plugin.Context, kind: LineKind) {
-  const theme = ctx.theme.contextual.elevated
-  switch (kind) {
-    case "added":
-      return theme.diff.text.added
-    case "removed":
-      return theme.diff.text.removed
-    case "hunk":
-      return theme.diff.text.hunkHeader
-    case "file":
-      return theme.text.default
-    case "context":
-      return theme.diff.text.context
-  }
-}
-
-function background(ctx: Plugin.Context, kind: LineKind) {
-  const theme = ctx.theme.contextual.elevated
-  if (kind === "added") return theme.diff.background.added
-  if (kind === "removed") return theme.diff.background.removed
-  return undefined
+  return createMemo(() => {
+    const previous = current
+    const [red, green, blue] = theme().background.default.toInts()
+    current = generateSyntax(theme(), red + green + blue > 383 * 3 ? "light" : "dark")
+    if (previous) release(previous)
+    return current
+  })
 }

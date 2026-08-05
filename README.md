@@ -5,10 +5,11 @@ Read [meat](https://github.com/boldsoftware/meat) **reading diffs** inside OpenC
 `meat` abridges a git diff with an LLM — it drops everything not worth reading and prints
 the remainder plus a one-line summary. This plugin runs the `meat` CLI directly from the
 TUI: `/meat` asks which model should read the diff and then gets out of the way. meat thinks
-in a background subprocess while you keep typing and sending prompts; a line above the
-prompt tracks it, and the finished diff opens in a full-screen, scrollable window whenever
-you ask for it. **No prompt is ever sent to your agent** — the slash command never reaches a
-session, so it costs no agent tokens and leaves no message behind.
+in a background subprocess while you keep typing and sending prompts; a spinner above the
+prompt counts the seconds, a toast says when it is done, and the finished diff opens in a
+full-screen window that renders it the way OpenCode's own `/diff` does. **No prompt is ever
+sent to your agent** — the slash command never reaches a session, so it costs no agent
+tokens and leaves no message behind.
 
 The same abridging is also exposed as a `meat` tool, so an agent can ask for it on purpose.
 
@@ -34,7 +35,7 @@ wherever `OPENCODE_CONFIG_DIR` points).
 {
   "name": "opencode-config",
   "private": true,
-  "dependencies": { "@suiramdev/opencode-meat": "^0.5.0" }
+  "dependencies": { "@suiramdev/opencode-meat": "^0.6.0" }
 }
 ```
 
@@ -70,24 +71,29 @@ file with no reachable `node_modules` fails with `Cannot find package 'solid-js'
 subprocess, no window. Picking a model starts `meat` and hands the prompt straight back:
 nothing takes over the screen, and the choice is remembered for next time.
 
-While meat reads, a line by the prompt keeps count, and you can keep typing and sending
-prompts past it. In a session it sits above the composer:
+While meat reads, a line above the composer keeps count — a spinner and a clock that both
+move — and you can keep typing and sending prompts past it:
 
 ```
 ⠙ meat is reading HEAD~3 · 12s
-meat read HEAD~3 · ctrl+x d to open
+✓ meat read HEAD~3 · ctrl+x d to open
 ```
 
-The welcome page has no composer, so the same notice appears in the prompt's own footer,
-shortened to fit:
+Every read also ends in a toast, naming the key that opens it:
 
 ```
-⠙ meat HEAD~3 · 12s        meat HEAD~3 · ctrl+x d
+meat read HEAD~3
+ctrl+x d to open · Rename the npm package and add the LICENSE
 ```
 
-Several reads can be in flight at once; each gets its own line. Whichever notice is showing,
-a failed read also raises a toast, so a failure is never silent even when the prompt is out
-of sight.
+The toast is what covers the routes with no composer, the welcome page above all. The two
+prompt-side slots that reach those routes — `prompt.footer.end` and `home.footer` — are
+single-winner slots that OpenCode's own footers already claim, and mounting there deletes
+them (context usage, cost, subagent and shell counts), so this plugin stays out.
+
+Several reads can be in flight at once; each gets its own line and its own toast. A failed
+read raises an error toast, so a failure is never silent even when the prompt is out of
+sight.
 
 | Command / key         | Does                                                         |
 | --------------------- | ------------------------------------------------------------ |
@@ -103,12 +109,18 @@ meat's own error plus the exact argv it ran.
 The last eight reads are kept, oldest finished ones dropped first; a read still in flight is
 never dropped. Nothing survives a TUI restart.
 
+The window renders through OpenTUI's own `<diff>` — the renderable behind OpenCode's
+`/diff` — so a reading diff arrives with a sign gutter, line numbers, diff colouring and
+tree-sitter syntax highlighting, under one file header and one hunk header at a time. It
+opens side by side when the terminal is at least 100 columns wide, unified below that.
+
 | Key                    | In the diff window   |
 | ---------------------- | -------------------- |
 | `j` / `k`, `↓` / `↑`   | scroll a line        |
 | `ctrl+f` / `ctrl+b`    | scroll a page        |
 | `pagedown` / `pageup`  | scroll a page        |
 | `g`                    | back to the top      |
+| `v`                    | split ↔ unified      |
 | `esc` / `q`            | back where you were  |
 
 The agent can also call the `meat` tool directly — "use the meat tool to review HEAD~2".
@@ -250,11 +262,25 @@ export { default } from "../../../src/tui.js"
 
 `bun run typecheck` checks both.
 
+Load one copy or the other, never both: the published package in your config directory and
+a checkout wired here register the same commands and the same slot, and a read started by
+one is invisible to the other. Rename `<config>/plugins/tui/meat.ts` out of the way while
+you work on a checkout.
+
+Any module of this plugin that touches Solid has to be `.tsx`, JSX or no JSX. OpenCode hands
+plugins its own Solid runtime by rewriting their `solid-js` imports, but the rewrite a local
+checkout gets is `@opentui/solid`'s transform plugin, whose file filter only matches
+`.tsx`/`.jsx`. A `.ts` module links against a second copy of Solid instead: its signals work
+among themselves, and nothing they change ever reaches a component.
+
 ## Notes
 
-- The abridged diff is a **reading** diff, not an applicable patch: removed lines leave
-  original hunk counts stale by design, which is why the window colours lines by their
-  marker instead of parsing the diff.
+- The abridged diff is a **reading** diff, not an applicable patch: meat drops lines and
+  leaves the original `@@` counts stale by design. The window restates each hunk header over
+  the lines that survived — otherwise OpenTUI's diff parser rejects the patch outright — and
+  splits the patch per file, since the renderable only ever draws the first one. Hunk starts
+  are meat's own and are left alone, so line numbers are right at the top of every hunk and
+  drift by however much was elided further down it.
 - A missing binary surfaces as a tool error naming the `go install` command.
 - meat's own errors (missing API key, `no diff to read`, bad revision) are passed through
   verbatim from its stderr.

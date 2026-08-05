@@ -1,3 +1,12 @@
+/**
+ * `.tsx`, with no JSX in it, on purpose. OpenCode hands plugins its own Solid
+ * runtime by rewriting their `solid-js` imports, but the rewrite that reaches a
+ * local checkout is `@opentui/solid`'s transform plugin, and its file filter is
+ * built without `resolvePath` — so it only matches `.tsx`/`.jsx`. A `.ts` module
+ * silently links against a second copy of Solid: its signals still work among
+ * themselves, but nothing they change is ever seen by a component, which is
+ * exactly what froze the progress notice.
+ */
 import type { Plugin } from "@opencode-ai/plugin/tui"
 import { createSignal, type Accessor } from "solid-js"
 import { errorMessage, runMeat, type MeatConfig, type MeatResult, type Target } from "./meat.js"
